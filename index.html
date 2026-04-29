@@ -1,0 +1,1259 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>案件列管系統</title>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Excel 匯出庫 (SheetJS) -->
+    <script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#6366f1', /* Indigo 500 */
+                        secondary: '#94a3b8',
+                        surface: '#f8fafc', /* Slate 50 */
+                    },
+                    boxShadow: {
+                        'soft': '0 4px 20px -2px rgba(0, 0, 0, 0.03)',
+                        'float': '0 10px 40px -10px rgba(0, 0, 0, 0.08)',
+                    },
+                    borderRadius: {
+                        '2xl': '1rem',
+                        '3xl': '1.5rem',
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700;900&display=swap');
+        body { 
+            font-family: 'Noto Sans TC', sans-serif; 
+            background-color: #f8fafc; 
+            color: #334155;
+        }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        
+        input[type="text"], input[type="email"], input[type="date"], select, textarea {
+            transition: all 0.2s ease-in-out;
+            border: 1px solid transparent;
+            background-color: #f1f5f9;
+        }
+        input:focus, select:focus, textarea:focus {
+            background-color: #ffffff;
+            border-color: #c7d2fe;
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+            outline: none;
+        }
+
+        .animate-fade-in { animation: fadeIn 0.3s ease-out forwards; }
+        @keyframes fadeIn { 
+            from { opacity: 0; transform: translateY(10px); } 
+            to { opacity: 1; transform: translateY(0); } 
+        }
+    </style>
+
+    <!-- Firebase Modular SDK -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        window.FirebaseModules = {
+            initializeApp, getAuth, signInAnonymously, onAuthStateChanged,
+            getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, getDoc
+        };
+    </script>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef } = React;
+
+        const TAOYUAN_DISTRICTS = ['桃園區', '中壢區', '平鎮區', '八德區', '楊梅區', '蘆竹區', '大溪區', '龜山區', '大園區', '觀音區', '新屋區', '龍潭區', '復興區'];
+
+        // 確保日期不受時區影響 (轉換為本地 YYYY-MM-DD)
+        const getLocalISODate = (date = new Date()) => {
+            if (!date || isNaN(new Date(date).getTime())) return '';
+            const d = new Date(date);
+            const year = d.getFullYear();
+            const month = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            return `${year}-${month}-${day}`;
+        };
+
+        const calculateWorkingDays = (dateStr, addDays = 3) => {
+            if (!dateStr) return '';
+            const d = new Date(dateStr);
+            if (isNaN(d.getTime())) return '';
+            let daysAdded = 0;
+            while (daysAdded < addDays) {
+                d.setDate(d.getDate() + 1);
+                if (d.getDay() !== 0 && d.getDay() !== 6) daysAdded++;
+            }
+            return getLocalISODate(d);
+        };
+
+        const calculateMonthsDeadline = (dateStr, addMonths = 2) => {
+            if (!dateStr) return '';
+            const d = new Date(dateStr);
+            if (isNaN(d.getTime())) return '';
+            d.setMonth(d.getMonth() + addMonths);
+            return getLocalISODate(d);
+        };
+
+        const sortCases = (casesList) => {
+            return [...casesList].sort((a, b) => {
+                const getSortDate = (c) => {
+                    if (c.caseType === 'SPECIAL') return c.extData?.assignDate || c.extData?.receiveDate || c.createdAt;
+                    return c.extData?.surveyDate || c.extData?.replyDate || c.extData?.receiveDate || c.createdAt;
+                };
+                return new Date(getSortDate(b) || 0) - new Date(getSortDate(a) || 0);
+            });
+        };
+
+        const Icons = {
+            List: () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>,
+            Plus: () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>,
+            Search: () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>,
+            User: () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>,
+            Check: () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>,
+            Trash: () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>,
+            Archive: () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="4" width="20" height="5" rx="2"></rect><path d="M4 9v9a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9"></path><line x1="10" y1="13" x2="14" y2="13"></line></svg>,
+            Bell: () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>,
+            Alert: () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>,
+            Clock: () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>,
+            Undo: () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7v6h6"></path><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"></path></svg>,
+            Folder: () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>,
+            ArrowLeft: () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>,
+            Star: () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>,
+            Edit: () => <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>,
+            Settings: () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>,
+            Download: () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>,
+            Upload: () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>,
+            FileExcel: () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="9" y1="15" x2="15" y2="15"></line><line x1="9" y1="11" x2="15" y2="11"></line><line x1="9" y1="19" x2="15" y2="19"></line></svg>,
+        };
+
+        const Modal = ({ isOpen, title, content, actions }) => {
+            if (!isOpen) return null;
+            return (
+                <div className="fixed inset-0 z-modal flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 animate-fade-in">
+                    <div className="bg-white rounded-3xl shadow-float max-w-md w-full overflow-hidden">
+                        <div className="p-8">
+                            <h3 className="text-xl font-bold text-slate-800 mb-3">{title}</h3>
+                            <div className="text-slate-500 text-base mb-8 whitespace-pre-wrap leading-relaxed">{content}</div>
+                            <div className="flex flex-col gap-3">
+                                {actions}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const StatusBadge = ({ status }) => {
+            const config = {
+                PENDING: { color: 'bg-amber-50 text-amber-700', label: '辦理中' },
+                CLOSED: { color: 'bg-emerald-50 text-emerald-700', label: '已結案' },
+            }[status] || { color: 'bg-slate-100 text-slate-600', label: status };
+            return <span className={`px-3 py-1.5 rounded-full text-xs font-bold tracking-wide ${config.color}`}>{config.label}</span>;
+        };
+
+        const CategoryBadge = ({ category }) => {
+            const config = {
+                SURVEY: { color: 'bg-indigo-50 text-indigo-700', label: '會勘' },
+                REPLY: { color: 'bg-cyan-50 text-cyan-700', label: '回復' },
+                A1: { color: 'bg-rose-50 text-rose-700', label: 'A1事故' },
+                DIRECTOR: { color: 'bg-red-100 text-red-700', label: '局長案' },
+                TEMP: { color: 'bg-orange-100 text-orange-700', label: '臨時交辦' },
+                OTHER_SPECIAL: { color: 'bg-stone-100 text-stone-700', label: '其他(特殊)' },
+            }[category] || { color: 'bg-slate-100 text-slate-600', label: '未分類' };
+            return <span className={`px-3 py-1.5 rounded-full text-xs font-bold tracking-wide ${config.color} whitespace-nowrap`}>{config.label}</span>;
+        };
+
+        const CaseList = ({ cases, onSelectCase, activeTab, onTabChange, config, isSpecialMode }) => {
+            const [filter, setFilter] = useState('');
+            const modeFilteredCases = cases.filter(c => isSpecialMode ? c.caseType === 'SPECIAL' : c.caseType !== 'SPECIAL');
+            const tabFilteredCases = modeFilteredCases.filter(c => config.tabs.find(t => t.id === activeTab)?.filter(c));
+            
+            const filteredCases = tabFilteredCases.filter(c => {
+                const keyword = filter.toLowerCase();
+                return (c.caseNumber && c.caseNumber.toLowerCase().includes(keyword)) ||
+                       (c.location?.address?.toLowerCase().includes(keyword)) ||
+                       (c.location?.district?.toLowerCase().includes(keyword)) ||
+                       (c.petitioner?.name?.toLowerCase().includes(keyword)) ||
+                       (c.extData?.assignee?.toLowerCase().includes(keyword)) ||
+                       (c.content?.toLowerCase().includes(keyword)) ||
+                       (c.extData?.note?.toLowerCase().includes(keyword)) ||
+                       (c.extData?.surveyDocNo?.toLowerCase().includes(keyword)) ||
+                       (c.extData?.recordDocNo?.toLowerCase().includes(keyword)) ||
+                       (c.extData?.replyDocNo?.toLowerCase().includes(keyword));
+            });
+
+            return (
+                <div className="h-full flex flex-col animate-fade-in">
+                    <div className="flex p-1.5 bg-white shadow-soft rounded-2xl w-fit mb-6 mx-auto md:mx-0">
+                        {config.tabs.map(tab => {
+                            const isActive = activeTab === tab.id;
+                            const activeColor = isSpecialMode ? 'bg-red-500 text-white shadow-md' : 'bg-primary text-white shadow-md';
+                            return (
+                                <button 
+                                    key={tab.id}
+                                    className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 ${isActive ? activeColor : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50'}`}
+                                    onClick={() => onTabChange(tab.id)}
+                                >
+                                    <tab.icon /> {tab.label}
+                                </button>
+                            );
+                        })}
+                    </div>
+
+                    <div className="relative mb-6">
+                        <div className="absolute inset-y-0 left-4 flex items-center pointer-events-none text-slate-400">
+                            <Icons.Search />
+                        </div>
+                        <input 
+                            type="text" 
+                            placeholder={`輸入關鍵字 (如：${isSpecialMode ? '交辦內容、承辦人、備註' : '地點、陳情人、文號、內容、備註'})...`}
+                            className={`w-full pl-12 pr-4 py-4 bg-white shadow-soft rounded-2xl text-slate-700 placeholder-slate-400 focus:ring-4 border-none transition-all ${isSpecialMode ? 'focus:ring-red-500/20' : 'focus:ring-indigo-500/20'}`}
+                            value={filter}
+                            onChange={(e) => setFilter(e.target.value)}
+                        />
+                    </div>
+                    
+                    <div className="hidden md:block flex-1 overflow-y-auto bg-white rounded-3xl shadow-soft">
+                        <table className="w-full text-sm text-left">
+                            <thead className="text-xs text-slate-400 uppercase tracking-wider sticky top-0 bg-white/90 backdrop-blur-md z-10 border-b border-slate-100">
+                                <tr>
+                                    <th className="px-4 py-5 font-bold whitespace-nowrap">狀態 / 類別</th>
+                                    <th className="px-4 py-5 font-bold whitespace-nowrap">{isSpecialMode ? '收件日期' : '會勘日期'}</th>
+                                    <th className="px-4 py-5 font-bold">{isSpecialMode ? '負責承辦人' : '地點資訊'}</th>
+                                    <th className="px-4 py-5 font-bold whitespace-nowrap">{isSpecialMode ? '交辦時間' : '陳情人'}</th>
+                                    {!isSpecialMode && <th className="px-4 py-5 font-bold whitespace-nowrap">承辦人</th>}
+                                    <th className="px-4 py-5 font-bold w-1/4">{isSpecialMode ? '交辦內容' : '陳情內容'}</th>
+                                    <th className="px-4 py-5 font-bold whitespace-nowrap">派工日期</th>
+                                    <th className="px-4 py-5 font-bold whitespace-nowrap">結案日期</th>
+                                    <th className="px-4 py-5 font-bold text-center whitespace-nowrap">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-50">
+                                {filteredCases.map((c) => (
+                                    <tr key={c.id} className="hover:bg-slate-50/80 transition-colors group">
+                                        <td className="px-4 py-4">
+                                            <div className="flex flex-col gap-2 items-start">
+                                                <StatusBadge status={c.status} />
+                                                <CategoryBadge category={c.category} />
+                                            </div>
+                                        </td>
+                                        <td className="px-4 py-4 whitespace-nowrap text-slate-600 font-medium">
+                                            {isSpecialMode ? (c.extData?.receiveDate || '-') : (c.extData?.surveyDate || '-')}
+                                        </td>
+                                        {isSpecialMode ? (
+                                            <>
+                                                <td className="px-4 py-4 font-bold text-slate-700">{c.extData?.assignee || '未指派'}</td>
+                                                <td className="px-4 py-4 text-slate-500 whitespace-nowrap">{c.extData?.assignDate || '-'}</td>
+                                            </>
+                                        ) : (
+                                            <>
+                                                <td className="px-4 py-4">
+                                                    <div className="font-bold text-slate-700">{c.location?.district || '-'}</div>
+                                                    <div className="text-slate-500 text-xs mt-1 truncate max-w-[140px]">{c.location?.address || '-'}</div>
+                                                </td>
+                                                <td className="px-4 py-4 font-medium text-slate-600 whitespace-nowrap">{c.petitioner?.name || '-'}</td>
+                                                <td className="px-4 py-4 font-bold text-slate-700 whitespace-nowrap">{c.extData?.assignee || '未指派'}</td>
+                                            </>
+                                        )}
+                                        <td className="px-4 py-4">
+                                            <div className="text-slate-500 line-clamp-2 leading-relaxed">{c.content}</div>
+                                        </td>
+                                        <td className="px-4 py-4 whitespace-nowrap text-slate-600">{c.extData?.dispatchDate || '-'}</td>
+                                        <td className="px-4 py-4 whitespace-nowrap text-slate-600 font-medium">{c.extData?.completionDate || '-'}</td>
+                                        <td className="px-4 py-4 text-center">
+                                            <button 
+                                                onClick={() => onSelectCase(c)}
+                                                className={`font-bold px-4 py-2 rounded-xl transition-all whitespace-nowrap ${isSpecialMode ? 'text-red-600 hover:text-red-700 bg-red-50 hover:bg-red-100' : 'text-primary hover:text-indigo-700 bg-indigo-50 hover:bg-indigo-100'}`}
+                                            >
+                                                查看詳情
+                                            </button>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                        {filteredCases.length === 0 && (
+                            <div className="flex flex-col items-center justify-center py-20 text-slate-400">
+                                <Icons.Archive />
+                                <p className="mt-4 font-medium tracking-wide">目前沒有符合條件的案件</p>
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="md:hidden flex-1 overflow-y-auto space-y-4 pb-20">
+                        {filteredCases.map(c => (
+                            <div key={c.id} className={`bg-white p-5 rounded-3xl shadow-soft cursor-pointer active:scale-95 transition-transform border-l-4 ${isSpecialMode ? 'border-red-400' : 'border-indigo-400'}`} onClick={() => onSelectCase(c)}>
+                                <div className="flex justify-between items-start mb-4">
+                                    <div className="flex flex-col gap-2">
+                                        <StatusBadge status={c.status} />
+                                        <CategoryBadge category={c.category} />
+                                    </div>
+                                    {!isSpecialMode && c.location?.district && (
+                                        <span className="bg-indigo-50 text-indigo-600 px-3 py-1 rounded-lg text-xs font-bold whitespace-nowrap ml-2">{c.location.district}</span>
+                                    )}
+                                </div>
+                                <div className="flex flex-wrap gap-2 text-xs font-bold text-slate-500 mb-3">
+                                    <span className="bg-slate-100 px-2 py-1 rounded-md">{isSpecialMode ? '收件' : '會勘'}: {isSpecialMode ? (c.extData?.receiveDate || '-') : (c.extData?.surveyDate || '-')}</span>
+                                    <span className="bg-slate-100 px-2 py-1 rounded-md">派工: {c.extData?.dispatchDate || '-'}</span>
+                                    <span className="bg-slate-100 px-2 py-1 rounded-md">結案: {c.extData?.completionDate || '-'}</span>
+                                </div>
+                                {isSpecialMode ? (
+                                    <>
+                                        <div className="font-bold text-slate-800 mb-1 leading-snug">承辦人：{c.extData?.assignee || '未指派'}</div>
+                                        <div className="text-sm text-slate-400 mb-3">交辦日期：{c.extData?.assignDate || '-'}</div>
+                                    </>
+                                ) : (
+                                    <>
+                                        <div className="font-bold text-slate-800 mb-1 leading-snug">{c.location?.address}</div>
+                                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-slate-400 mb-3">
+                                            <span>陳情人：{c.petitioner?.name}</span>
+                                            <span>承辦人：<span className="font-bold text-slate-600">{c.extData?.assignee || '未指派'}</span></span>
+                                        </div>
+                                    </>
+                                )}
+                                
+                                <div className="text-sm text-slate-500 line-clamp-2 bg-slate-50 p-3 rounded-2xl leading-relaxed">
+                                    {c.content}
+                                </div>
+                            </div>
+                        ))}
+                        {filteredCases.length === 0 && (
+                            <div className="text-center py-16 text-slate-400 font-medium">目前沒有符合條件的案件</div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const CaseForm = ({ onSubmit, onCancel, isSpecialMode }) => {
+            const [isSubmitting, setIsSubmitting] = useState(false);
+            const [formData, setFormData] = useState({
+                caseType: isSpecialMode ? 'SPECIAL' : 'NORMAL',
+                category: isSpecialMode ? 'DIRECTOR' : 'SURVEY', 
+                name: '', district: '桃園區', address: '', content: '',
+                extData: { 
+                    receiveDate: '',
+                    surveyDate: '', surveyDocNo: '', assignee: '', recordDeadline: '', recordActualDate: '', recordDocNo: '', surveyResolution: '', dispatchDate: '', completionDate: '', completionDeadline: '', noDispatchRequired: false, dismissedMonthNotice: false,
+                    assignDate: '', handlingStatus: '',
+                    replyDate: '', replyDocNo: '', replyContent: '', note: ''
+                }
+            });
+
+            const handleExtData = (f, v) => setFormData(p => ({ ...p, extData: { ...p.extData, [f]: v } }));
+            const handleSubmit = async (e) => {
+                e.preventDefault(); setIsSubmitting(true);
+                try { await onSubmit(formData); } catch (err) { console.warn(err); } finally { setIsSubmitting(false); }
+            };
+
+            const themeColor = isSpecialMode ? 'text-red-500' : 'text-primary';
+            const themeBg = isSpecialMode ? 'bg-red-50' : 'bg-indigo-50';
+            const themeBtn = isSpecialMode ? 'bg-red-500 hover:bg-red-600' : 'bg-primary hover:bg-indigo-600';
+            const themeRing = isSpecialMode ? 'focus:ring-red-500/20' : 'focus:ring-indigo-500/20';
+
+            return (
+                <div className="h-full flex justify-center animate-fade-in overflow-y-auto pb-20 md:pb-0">
+                    <div className="w-full max-w-4xl bg-white p-6 md:p-10 rounded-3xl shadow-soft h-fit">
+                        <div className="flex items-center gap-4 mb-8 pb-6 border-b border-slate-100">
+                            <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${themeBg} ${themeColor}`}>
+                                {isSpecialMode ? <Icons.Star /> : <Icons.Plus />}
+                            </div>
+                            <div>
+                                <h2 className="text-2xl font-black text-slate-800 tracking-wide">{isSpecialMode ? '新增特殊交辦案件' : '新增案件資料'}</h2>
+                                <p className="text-sm text-slate-400 mt-1">{isSpecialMode ? '記錄長官交辦或特殊列管之案件' : '請填寫完整的案件資訊'}</p>
+                            </div>
+                        </div>
+                        
+                        <form onSubmit={handleSubmit} className="space-y-10">
+                            <section>
+                                <h3 className={`text-sm font-bold uppercase tracking-wider mb-5 px-1 ${themeColor}`}>基本資料</h3>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                                    <div className="space-y-1.5">
+                                        <label className="text-sm font-medium text-slate-600 px-1">案件類別</label>
+                                        <select className={`w-full rounded-2xl px-4 py-3.5 focus:ring-4 ${themeRing}`} value={formData.category} onChange={e => {
+                                            const newCategory = e.target.value;
+                                            const baseDate = formData.extData.surveyDate || formData.extData.replyDate;
+                                            const newDeadline = calculateMonthsDeadline(baseDate, newCategory === 'A1' ? 1 : 2);
+                                            setFormData(prev => ({...prev, category: newCategory, extData: { ...prev.extData, completionDeadline: newDeadline }}));
+                                        }}>
+                                            {isSpecialMode ? (
+                                                <>
+                                                    <option value="DIRECTOR">局長案</option>
+                                                    <option value="TEMP">臨時交辦案件</option>
+                                                    <option value="OTHER_SPECIAL">其他(特殊)</option>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <option value="SURVEY">會勘</option>
+                                                    <option value="REPLY">回復</option>
+                                                    <option value="A1">A1事故</option>
+                                                </>
+                                            )}
+                                        </select>
+                                    </div>
+
+                                    <div className="space-y-1.5">
+                                        <label className="text-sm font-medium text-slate-600 px-1">收文 / 收件日期</label>
+                                        <input required type="date" className={`w-full rounded-2xl px-4 py-3.5 focus:ring-4 ${themeRing}`} value={formData.extData.receiveDate} onChange={e => handleExtData('receiveDate', e.target.value)} />
+                                    </div>
+                                    
+                                    {isSpecialMode ? (
+                                        <>
+                                            <div className="space-y-1.5">
+                                                <label className="text-sm font-medium text-slate-600 px-1">交辦時間</label>
+                                                <input required type="date" className={`w-full rounded-2xl px-4 py-3.5 focus:ring-4 ${themeRing}`} value={formData.extData.assignDate} onChange={e => handleExtData('assignDate', e.target.value)} />
+                                            </div>
+                                            <div className="space-y-1.5">
+                                                <label className="text-sm font-medium text-slate-600 px-1">預定結案時間</label>
+                                                <input required type="date" className={`w-full rounded-2xl px-4 py-3.5 focus:ring-4 ${themeRing}`} value={formData.extData.completionDeadline} onChange={e => handleExtData('completionDeadline', e.target.value)} />
+                                            </div>
+                                            <div className="space-y-1.5 md:col-span-2">
+                                                <label className="text-sm font-medium text-slate-600 px-1">承辦人</label>
+                                                <input required type="text" className={`w-full rounded-2xl px-4 py-3.5 focus:ring-4 ${themeRing}`} placeholder="負責人員姓名" value={formData.extData.assignee} onChange={e => handleExtData('assignee', e.target.value)} />
+                                            </div>
+                                            <div className="md:col-span-2 space-y-1.5">
+                                                <label className="text-sm font-medium text-slate-600 px-1">交辦內容</label>
+                                                <textarea required rows="4" className={`w-full rounded-3xl px-4 py-4 leading-relaxed focus:ring-4 ${themeRing}`} placeholder="詳細敘述交辦事項..." value={formData.content} onChange={e => setFormData({...formData, content: e.target.value})}></textarea>
+                                            </div>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <div className="space-y-1.5">
+                                                <label className="text-sm font-medium text-slate-600 px-1">陳情人</label>
+                                                <input required type="text" className={`w-full rounded-2xl px-4 py-3.5 focus:ring-4 ${themeRing}`} value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} placeholder="陳情人姓名" />
+                                            </div>
+                                            <div className="space-y-1.5">
+                                                <label className="text-sm font-medium text-slate-600 px-1">行政區</label>
+                                                <select className={`w-full rounded-2xl px-4 py-3.5 focus:ring-4 ${themeRing}`} value={formData.district} onChange={e => setFormData({...formData, district: e.target.value})}>
+                                                    {TAOYUAN_DISTRICTS.map(d => <option key={d} value={d}>{d}</option>)}
+                                                </select>
+                                            </div>
+                                            <div className="md:col-span-2 space-y-1.5">
+                                                <label className="text-sm font-medium text-slate-600 px-1">詳細地點 (路口/地址)</label>
+                                                <input required type="text" className={`w-full rounded-2xl px-4 py-3.5 focus:ring-4 ${themeRing}`} placeholder="例如：中正路與力行路口" value={formData.address} onChange={e => setFormData({...formData, address: e.target.value})} />
+                                            </div>
+                                            <div className="md:col-span-2 space-y-1.5">
+                                                <label className="text-sm font-medium text-slate-600 px-1">陳情內容</label>
+                                                <textarea required rows="4" className={`w-full rounded-3xl px-4 py-4 leading-relaxed focus:ring-4 ${themeRing}`} placeholder="簡述案件狀況..." value={formData.content} onChange={e => setFormData({...formData, content: e.target.value})}></textarea>
+                                            </div>
+                                        </>
+                                    )}
+                                    <div className="md:col-span-2 space-y-1.5">
+                                        <label className="text-sm font-medium text-slate-600 px-1">備註 (選填)</label>
+                                        <textarea rows="2" className={`w-full rounded-2xl px-4 py-3 leading-relaxed focus:ring-4 ${themeRing}`} placeholder="其他補充事項..." value={formData.extData.note} onChange={e => handleExtData('note', e.target.value)}></textarea>
+                                    </div>
+                                </div>
+                            </section>
+
+                            {!isSpecialMode && formData.category === 'REPLY' ? (
+                                <section>
+                                    <h3 className="text-sm font-bold text-cyan-600 uppercase tracking-wider mb-5 px-1">回復預定資訊</h3>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-5 bg-cyan-50/50 p-6 rounded-3xl border border-cyan-100">
+                                        <div className="space-y-1.5">
+                                            <label className="text-sm font-medium text-slate-600 px-1">承辦人</label>
+                                            <input type="text" className="w-full rounded-2xl px-4 py-3.5 bg-white focus:ring-4 focus:ring-cyan-500/20" placeholder="承辦人員姓名" value={formData.extData.assignee} onChange={e => handleExtData('assignee', e.target.value)} />
+                                        </div>
+                                        <div className="space-y-1.5">
+                                            <label className="text-sm font-medium text-slate-600 px-1">回復日期</label>
+                                            <input type="date" className="w-full rounded-2xl px-4 py-3.5 bg-white focus:ring-4 focus:ring-cyan-500/20" value={formData.extData.replyDate} 
+                                                onChange={e => {
+                                                    const val = e.target.value;
+                                                    handleExtData('replyDate', val);
+                                                    handleExtData('completionDeadline', calculateMonthsDeadline(val, 2));
+                                                }} />
+                                        </div>
+                                        <div className="space-y-1.5 md:col-span-2">
+                                            <label className="text-sm font-medium text-slate-600 px-1">回復文號</label>
+                                            <input type="text" className="w-full rounded-2xl px-4 py-3.5 bg-white focus:ring-4 focus:ring-cyan-500/20" placeholder="輸入回復文號" value={formData.extData.replyDocNo} onChange={e => handleExtData('replyDocNo', e.target.value)} />
+                                        </div>
+                                        <div className="md:col-span-2 bg-cyan-100/50 p-4 rounded-2xl border border-cyan-200 mt-2">
+                                            <label className="text-sm font-bold text-cyan-700 mb-2 flex items-center gap-1"><Icons.Clock /> 期限設定 (自動推算)</label>
+                                            <div>
+                                                <span className="text-xs font-bold text-cyan-600 mb-1 block">結案期限 (+2個月)</span>
+                                                <input type="date" className="w-full rounded-xl px-3 py-2.5 bg-white text-cyan-700 border border-cyan-200 focus:ring-2 focus:ring-cyan-500/20" value={formData.extData.completionDeadline} onChange={e => handleExtData('completionDeadline', e.target.value)} />
+                                            </div>
+                                        </div>
+                                    </div>
+                                </section>
+                            ) : !isSpecialMode ? (
+                                <section>
+                                    <h3 className="text-sm font-bold text-primary uppercase tracking-wider mb-5 px-1">會勘預定資訊</h3>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-5 bg-indigo-50/50 p-6 rounded-3xl border border-indigo-100">
+                                        <div className="space-y-1.5">
+                                            <label className="text-sm font-medium text-slate-600 px-1">承辦人</label>
+                                            <input type="text" className="w-full rounded-2xl px-4 py-3.5 bg-white focus:ring-4 focus:ring-indigo-500/20" placeholder="承辦人員姓名" value={formData.extData.assignee} onChange={e => handleExtData('assignee', e.target.value)} />
+                                        </div>
+                                        <div className="space-y-1.5">
+                                            <label className="text-sm font-medium text-slate-600 px-1">{formData.category === 'A1' ? '會勘通知文號(分局來文)' : '會勘通知文號'}</label>
+                                            <input type="text" className="w-full rounded-2xl px-4 py-3.5 bg-white focus:ring-4 focus:ring-indigo-500/20" placeholder="輸入文號" value={formData.extData.surveyDocNo} onChange={e => handleExtData('surveyDocNo', e.target.value)} />
+                                        </div>
+                                        <div className="space-y-1.5 md:col-span-2">
+                                            <label className="text-sm font-medium text-slate-600 px-1">會勘日期</label>
+                                            <input type="date" className="w-full rounded-2xl px-4 py-3.5 bg-white focus:ring-4 focus:ring-indigo-500/20" value={formData.extData.surveyDate} 
+                                                onChange={e => {
+                                                    const val = e.target.value;
+                                                    handleExtData('surveyDate', val);
+                                                    handleExtData('recordDeadline', calculateWorkingDays(val, 3));
+                                                    handleExtData('completionDeadline', calculateMonthsDeadline(val, formData.category === 'A1' ? 1 : 2));
+                                                }} />
+                                        </div>
+                                        <div className="md:col-span-2 bg-indigo-100/50 p-4 rounded-2xl border border-indigo-200 mt-2">
+                                            <label className="text-sm font-bold text-indigo-700 mb-3 flex items-center gap-1"><Icons.Clock /> 期限設定 (依會勘日期自動推算)</label>
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                                <div>
+                                                    <span className="text-xs font-bold text-indigo-600 mb-1 block">紀錄取號期限 (+3工作日)</span>
+                                                    <input type="date" className="w-full rounded-xl px-3 py-2.5 bg-white text-indigo-700 border border-indigo-200 focus:ring-2 focus:ring-indigo-500/20" value={formData.extData.recordDeadline} onChange={e => handleExtData('recordDeadline', e.target.value)} />
+                                                </div>
+                                                <div>
+                                                    <span className="text-xs font-bold text-indigo-600 mb-1 block">結案期限 (+{formData.category === 'A1' ? '1' : '2'}個月)</span>
+                                                    <input type="date" className="w-full rounded-xl px-3 py-2.5 bg-white text-indigo-700 border border-indigo-200 focus:ring-2 focus:ring-indigo-500/20" value={formData.extData.completionDeadline} onChange={e => handleExtData('completionDeadline', e.target.value)} />
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </section>
+                            ) : null}
+
+                            <div className="flex gap-4 pt-4 border-t border-slate-100 mt-8">
+                                <button type="submit" disabled={isSubmitting} className={`flex-1 text-white py-4 rounded-2xl font-bold text-lg shadow-float transition-all active:scale-[0.98] ${isSubmitting ? 'bg-slate-300' : themeBtn}`}>
+                                    {isSubmitting ? '處理中...' : '確認立案'}
+                                </button>
+                                <button type="button" onClick={onCancel} className="flex-1 bg-white border-2 border-slate-100 text-slate-500 hover:text-slate-800 hover:bg-slate-50 py-4 rounded-2xl font-bold text-lg transition-all active:scale-[0.98]">
+                                    取消返回
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        };
+
+        const CaseDetail = ({ caseData, onBack, onUpdateStatus, onDelete, onEditHistory, onUpdateBasicInfo }) => {
+            const [isSubmitting, setIsSubmitting] = useState(false);
+            const [modalConfig, setModalConfig] = useState({ isOpen: false });
+            const isSpecialMode = caseData.caseType === 'SPECIAL';
+            const isReplyMode = !isSpecialMode && caseData.category === 'REPLY';
+            const [editingHistoryIdx, setEditingHistoryIdx] = useState(null);
+            const [editingHistoryContent, setEditingHistoryContent] = useState('');
+
+            // Basic Info Edit States
+            const [isEditingAddress, setEditingAddress] = useState(false);
+            const [editedAddress, setEditedAddress] = useState('');
+            const [isEditingContent, setEditingContent] = useState(false);
+            const [editedContent, setEditedContent] = useState('');
+
+            const [editExtData, setEditExtData] = useState({
+                receiveDate: '',
+                surveyDate: '',
+                recordDeadline: '',
+                recordActualDate: '',
+                recordDocNo: '',
+                surveyResolution: '',
+                dispatchDate: '',
+                completionDate: '',
+                completionDeadline: '',
+                noDispatchRequired: false,
+                assignDate: '',
+                handlingStatus: '',
+                assignee: '',
+                replyDate: '',
+                replyDocNo: '',
+                replyContent: '',
+                note: ''
+            });
+
+            useEffect(() => {
+                setEditedAddress(caseData.location?.address || '');
+                setEditedContent(caseData.content || '');
+                setEditExtData({
+                    receiveDate: caseData.extData?.receiveDate || '',
+                    surveyDate: caseData.extData?.surveyDate || '',
+                    recordDeadline: caseData.extData?.recordDeadline || '',
+                    recordActualDate: caseData.extData?.recordActualDate || '',
+                    recordDocNo: caseData.extData?.recordDocNo || '',
+                    surveyResolution: caseData.extData?.surveyResolution || '',
+                    dispatchDate: caseData.extData?.dispatchDate || '',
+                    completionDate: caseData.extData?.completionDate || '',
+                    completionDeadline: caseData.extData?.completionDeadline || '',
+                    noDispatchRequired: caseData.extData?.noDispatchRequired || false,
+                    assignDate: caseData.extData?.assignDate || '',
+                    handlingStatus: caseData.extData?.handlingStatus || '',
+                    assignee: caseData.extData?.assignee || '',
+                    replyDate: caseData.extData?.replyDate || '',
+                    replyDocNo: caseData.extData?.replyDocNo || '',
+                    replyContent: caseData.extData?.replyContent || '',
+                    note: caseData.extData?.note || ''
+                });
+            }, [caseData.id]); 
+
+            const closeM = () => setModalConfig({ isOpen: false });
+
+            const handleExtDataReply = async (stage) => {
+                setIsSubmitting(true);
+                try {
+                    let actionText = stage === 'CLOSED' ? '更新案件資訊並結案' : '更新案件處理資訊';
+                    let dataToSave = { ...editExtData };
+                    if (isSpecialMode && editExtData.handlingStatus && editExtData.handlingStatus.trim() !== '') {
+                        actionText = `【辦理情形】${editExtData.handlingStatus}`;
+                        dataToSave.handlingStatus = ''; 
+                    }
+                    await onUpdateStatus(caseData.id, stage, actionText, dataToSave);
+                    if (isSpecialMode) setEditExtData(prev => ({ ...prev, handlingStatus: '' }));
+                } catch(e) { console.warn(e); } finally { setIsSubmitting(false); }
+            };
+
+            const handleRevert = async () => {
+                setIsSubmitting(true);
+                try { await onUpdateStatus(caseData.id, 'PENDING', '案件恢復為辦理中', editExtData); } 
+                catch(e) { console.warn(e); } finally { setIsSubmitting(false); }
+            };
+
+            const delClick = () => {
+                setModalConfig({
+                    isOpen: true, title: '確認刪除案件', content: '此動作無法復原，您確定要刪除這筆案件紀錄嗎？',
+                    actions: (
+                        <div className="flex gap-3 mt-4">
+                            <button onClick={closeM} className="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold transition-colors">取消</button>
+                            <button onClick={async () => { closeM(); await onDelete(caseData.id); }} className="flex-1 px-4 py-3 bg-red-500 hover:bg-red-600 text-white rounded-xl font-bold shadow-md transition-colors">確認刪除</button>
+                        </div>
+                    )
+                });
+            };
+
+            const handleSaveAddress = () => {
+                onUpdateBasicInfo(caseData.id, { location: { ...caseData.location, address: editedAddress } });
+                setEditingAddress(false);
+            };
+
+            const handleSaveContent = () => {
+                onUpdateBasicInfo(caseData.id, { content: editedContent });
+                setEditingContent(false);
+            };
+
+            const themeColor = isSpecialMode ? 'text-red-500' : 'text-primary';
+            const themeBtn = isSpecialMode ? 'bg-red-500 hover:bg-red-600' : 'bg-primary hover:bg-indigo-600';
+            const themeRing = isSpecialMode ? 'focus:ring-red-500/20' : 'focus:ring-indigo-500/20';
+
+            return (
+                <div className="h-full flex flex-col xl:flex-row gap-6 overflow-hidden animate-fade-in pb-20 md:pb-0">
+                    <Modal {...modalConfig} />
+                    <div className="w-full xl:w-5/12 flex flex-col gap-6 overflow-y-auto pr-2 text-sm">
+                        <div className="bg-white p-8 rounded-3xl shadow-soft shrink-0">
+                            <div className="flex justify-between items-center mb-6">
+                                <button onClick={onBack} className={`hover:${themeColor} text-slate-400 flex items-center gap-2 text-sm font-bold transition-colors w-fit px-1`}>
+                                    <Icons.ArrowLeft /> 返回列表
+                                </button>
+                                <button onClick={delClick} className="text-red-400 hover:text-red-600 hover:bg-red-50 p-2 rounded-xl transition-colors flex items-center gap-1 text-sm font-bold" title="刪除案件">
+                                    <Icons.Trash /> 刪除
+                                </button>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-3 mb-6">
+                                <StatusBadge status={caseData.status} />
+                                <CategoryBadge category={caseData.category} />
+                                {!isSpecialMode && caseData.location?.district && <span className="bg-slate-100 text-slate-600 px-3 py-1.5 rounded-full text-xs font-bold tracking-wide">{caseData.location.district}</span>}
+                            </div>
+                            
+                            {isSpecialMode ? (
+                                <>
+                                    <h2 className="text-2xl font-black text-slate-800 leading-snug mb-2">特殊交辦案件</h2>
+                                    <p className="text-slate-400 font-medium mb-8">負責人：{caseData.extData?.assignee || '未指派'}</p>
+                                </>
+                            ) : (
+                                <>
+                                    <div className="group relative flex items-center justify-between mb-2 min-h-[3rem]">
+                                        {isEditingAddress ? (
+                                            <div className="flex-1 flex gap-2 items-center mr-2">
+                                                <input 
+                                                    type="text" 
+                                                    className="w-full rounded-xl px-3 py-1.5 border border-slate-300 focus:ring-2 focus:ring-indigo-500/20 text-2xl font-black text-slate-800"
+                                                    value={editedAddress}
+                                                    onChange={e => setEditedAddress(e.target.value)}
+                                                    autoFocus
+                                                />
+                                                <div className="flex gap-1">
+                                                    <button onClick={() => { setEditingAddress(false); setEditedAddress(caseData.location?.address || ''); }} className="p-2 text-slate-400 hover:bg-slate-100 rounded-lg"><Icons.Undo /></button>
+                                                    <button onClick={handleSaveAddress} className="p-2 text-primary hover:bg-indigo-50 rounded-lg"><Icons.Check /></button>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <>
+                                                <h2 className="text-2xl font-black text-slate-800 leading-snug pr-8 break-all">{caseData.location?.address}</h2>
+                                                {caseData.status !== 'CLOSED' && (
+                                                    <button onClick={() => setEditingAddress(true)} className="absolute right-0 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity text-primary hover:bg-indigo-50 p-1.5 rounded-lg flex items-center gap-1 text-xs font-bold">
+                                                        <Icons.Edit /> 修改
+                                                    </button>
+                                                )}
+                                            </>
+                                        )}
+                                    </div>
+                                    <p className="text-slate-400 font-medium mb-8">陳情人：{caseData.petitioner?.name}</p>
+                                </>
+                            )}
+
+                            <div className="bg-slate-50/70 p-6 rounded-3xl mb-6 group relative">
+                                <div className="flex justify-between items-center mb-3">
+                                    <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block">{isSpecialMode ? '交辦內容' : '陳情內容'}</span>
+                                    {caseData.status !== 'CLOSED' && !isEditingContent && (
+                                        <button onClick={() => setEditingContent(true)} className="opacity-0 group-hover:opacity-100 transition-opacity text-primary hover:bg-indigo-50 p-1 rounded flex items-center gap-1 text-xs font-bold">
+                                            <Icons.Edit /> 修改
+                                        </button>
+                                    )}
+                                </div>
+                                {isEditingContent ? (
+                                    <div className="flex flex-col gap-3">
+                                        <textarea 
+                                            rows="4" 
+                                            className="w-full rounded-xl px-3 py-2 border border-slate-300 focus:ring-4 focus:ring-indigo-500/20 bg-white text-slate-700 leading-relaxed"
+                                            value={editedContent}
+                                            onChange={e => setEditedContent(e.target.value)}
+                                            autoFocus
+                                        />
+                                        <div className="flex justify-end gap-2">
+                                            <button onClick={() => { setEditingContent(false); setEditedContent(caseData.content || ''); }} className="px-4 py-1.5 text-xs font-bold bg-slate-200 text-slate-600 rounded-lg hover:bg-slate-300 transition-colors">取消</button>
+                                            <button onClick={handleSaveContent} className="px-4 py-1.5 text-xs font-bold bg-primary text-white rounded-lg hover:bg-indigo-600 shadow-sm transition-colors">儲存修改</button>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <p className="text-slate-700 leading-relaxed whitespace-pre-wrap">{caseData.content}</p>
+                                )}
+                            </div>
+
+                            {caseData.extData?.note && (
+                                <div className="bg-amber-50 p-5 rounded-2xl mb-6 border border-amber-100">
+                                    <span className="text-xs font-bold text-amber-600 uppercase tracking-wider block mb-2">備註事項</span>
+                                    <p className="text-amber-800 text-sm leading-relaxed">{caseData.extData.note}</p>
+                                </div>
+                            )}
+
+                            <div className="grid grid-cols-2 gap-y-6 gap-x-4 border-t border-slate-100 pt-6">
+                                <div className="col-span-2"><span className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">收文 / 收件日期</span><span className="font-bold text-slate-700">{caseData.extData?.receiveDate || '-'}</span></div>
+                                {isSpecialMode ? (
+                                    <>
+                                        <div><span className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">交辦時間</span><span className="font-bold text-slate-700">{caseData.extData?.assignDate || '-'}</span></div>
+                                        <div><span className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">預定結案</span><span className="font-bold text-slate-700">{caseData.extData?.completionDeadline || '-'}</span></div>
+                                    </>
+                                ) : isReplyMode ? (
+                                    <>
+                                        <div><span className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">承辦人</span><span className="font-bold text-slate-700">{caseData.extData?.assignee || '尚未指派'}</span></div>
+                                        <div><span className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">回復日期</span><span className="font-bold text-slate-700">{caseData.extData?.replyDate || '-'}</span></div>
+                                        <div className="col-span-2"><span className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">回復文號</span><span className="font-bold text-slate-700">{caseData.extData?.replyDocNo || '-'}</span></div>
+                                    </>
+                                ) : (
+                                    <>
+                                        <div><span className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">承辦人</span><span className="font-bold text-slate-700">{caseData.extData?.assignee || '尚未指派'}</span></div>
+                                        <div><span className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">{caseData.category === 'A1' ? '會勘通知文號(分局來文)' : '通知文號'}</span><span className="font-bold text-slate-700">{caseData.extData?.surveyDocNo || '-'}</span></div>
+                                    </>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                    <div className="w-full xl:w-7/12 flex flex-col gap-6 overflow-y-auto pr-2">
+                        <div className="bg-white p-8 rounded-3xl shadow-soft shrink-0">
+                            <h3 className="text-lg font-black text-slate-800 mb-6 flex items-center gap-2"><Icons.Check /> {caseData.status === 'CLOSED' ? '結案資訊' : '案件處理進度'}</h3>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                                <div className="space-y-1.5 md:col-span-2"><label className="text-sm font-medium text-slate-600 px-1">收文 / 收件日期</label><input type="date" disabled={caseData.status==='CLOSED'} className={`w-full rounded-2xl px-4 py-3.5 focus:ring-4 ${themeRing}`} value={editExtData.receiveDate || ''} onChange={e => setEditExtData({...editExtData, receiveDate: e.target.value})} /></div>
+                                <div className="md:col-span-2 my-2 border-b border-slate-100"></div>
+                                {isSpecialMode ? (
+                                    <>
+                                        <div className="space-y-1.5"><label className="text-sm font-medium text-slate-600 px-1">預定結案時間</label><input type="date" disabled={caseData.status==='CLOSED'} className={`w-full rounded-2xl px-4 py-3.5 focus:ring-4 ${themeRing}`} value={editExtData.completionDeadline || ''} onChange={e => setEditExtData({...editExtData, completionDeadline: e.target.value})} /></div>
+                                        <div className="space-y-1.5"><label className="text-sm font-medium text-slate-600 px-1">實際結案時間</label><input type="date" disabled={caseData.status==='CLOSED'} className={`w-full rounded-2xl px-4 py-3.5 focus:ring-4 ${themeRing}`} value={editExtData.completionDate || ''} onChange={e => setEditExtData({...editExtData, completionDate: e.target.value})} /></div>
+                                        <div className="md:col-span-2 space-y-1.5"><label className="text-sm font-medium text-slate-600 px-1">承辦人</label><input type="text" disabled={caseData.status==='CLOSED'} className={`w-full rounded-2xl px-4 py-3.5 focus:ring-4 ${themeRing}`} value={editExtData.assignee || ''} onChange={e => setEditExtData({...editExtData, assignee: e.target.value})} /></div>
+                                        <div className="md:col-span-2 space-y-1.5"><label className="text-sm font-medium text-slate-600 px-1">辦理情形</label><textarea rows="3" disabled={caseData.status==='CLOSED'} placeholder="填寫最新辦理進度..." className={`w-full rounded-3xl px-4 py-4 leading-relaxed focus:ring-4 ${themeRing}`} value={editExtData.handlingStatus || ''} onChange={e => setEditExtData({...editExtData, handlingStatus: e.target.value})}></textarea></div>
+                                    </>
+                                ) : isReplyMode ? (
+                                    <>
+                                        <div className="space-y-1.5"><label className="text-sm font-medium text-slate-600 px-1">回復日期</label><input type="date" disabled={caseData.status==='CLOSED'} className="w-full rounded-2xl px-4 py-3.5 focus:ring-4 focus:ring-cyan-500/20" value={editExtData.replyDate || ''} onChange={e => { const val = e.target.value; setEditExtData({ ...editExtData, replyDate: val, completionDeadline: calculateMonthsDeadline(val, 2)}); }} /></div>
+                                        <div className="space-y-1.5"><label className="text-sm font-medium text-slate-600 px-1">回復文號</label><input type="text" disabled={caseData.status==='CLOSED'} className="w-full rounded-2xl px-4 py-3.5 focus:ring-4 focus:ring-cyan-500/20" value={editExtData.replyDocNo || ''} onChange={e => setEditExtData({...editExtData, replyDocNo: e.target.value})} /></div>
+                                        <div className="md:col-span-2 space-y-1.5"><label className="text-sm font-medium text-slate-600 px-1">回復內容</label><textarea rows="2" disabled={caseData.status==='CLOSED'} placeholder="填寫回復內容..." className="w-full rounded-3xl px-4 py-4 leading-relaxed focus:ring-4 focus:ring-cyan-500/20" value={editExtData.replyContent || ''} onChange={e => setEditExtData({...editExtData, replyContent: e.target.value})}></textarea></div>
+                                        <div className="md:col-span-2 my-2 border-b border-slate-100"></div>
+                                        <div className="space-y-1.5"><label className="text-sm font-medium text-slate-600 px-1">結案期限</label><input type="date" disabled={caseData.status==='CLOSED'} className="w-full rounded-2xl px-4 py-3.5 text-orange-600 bg-orange-50/30 focus:ring-4 focus:ring-indigo-500/20" value={editExtData.completionDeadline || ''} onChange={e => setEditExtData({...editExtData, completionDeadline: e.target.value})} /></div>
+                                        <div className="flex items-center justify-start md:mt-6"><label className="flex items-center cursor-pointer group"><input type="checkbox" disabled={caseData.status==='CLOSED'} checked={editExtData.noDispatchRequired || false} onChange={e => setEditExtData({...editExtData, noDispatchRequired: e.target.checked})} className="w-5 h-5 text-primary border-slate-300 rounded focus:ring-primary transition-colors cursor-pointer" /><span className="ml-3 text-sm font-bold text-slate-600 group-hover:text-primary transition-colors">不需派工施作 (可直接結案)</span></label></div>
+                                        {!editExtData.noDispatchRequired && (
+                                            <>
+                                                <div className="space-y-1.5 animate-fade-in"><label className="text-sm font-medium text-slate-600 px-1">派工日期</label><input type="date" disabled={caseData.status==='CLOSED'} className="w-full rounded-2xl px-4 py-3.5 focus:ring-4 focus:ring-indigo-500/20" value={editExtData.dispatchDate || ''} onChange={e => setEditExtData({...editExtData, dispatchDate: e.target.value})} /></div>
+                                                <div className="space-y-1.5 animate-fade-in"><label className="text-sm font-medium text-slate-600 px-1">完工日期</label><input type="date" disabled={caseData.status==='CLOSED'} className="w-full rounded-2xl px-4 py-3.5 focus:ring-4 focus:ring-indigo-500/20" value={editExtData.completionDate || ''} onChange={e => setEditExtData({...editExtData, completionDate: e.target.value})} /></div>
+                                            </>
+                                        )}
+                                    </>
+                                ) : (
+                                    <>
+                                        <div className="space-y-1.5"><label className="text-sm font-medium text-slate-600 px-1">會勘日期</label><input type="date" disabled={caseData.status==='CLOSED'} className="w-full rounded-2xl px-4 py-3.5 focus:ring-4 focus:ring-indigo-500/20" value={editExtData.surveyDate || ''} onChange={e => { const val = e.target.value; setEditExtData({ ...editExtData, surveyDate: val, recordDeadline: calculateWorkingDays(val, 3), completionDeadline: calculateMonthsDeadline(val, caseData.category === 'A1' ? 1 : 2)}); }} /></div>
+                                        <div className="space-y-1.5"><label className="text-sm font-medium text-slate-600 px-1">紀錄取號期限</label><input type="date" disabled={caseData.status==='CLOSED'} className="w-full rounded-2xl px-4 py-3.5 text-indigo-600 bg-indigo-50/30 focus:ring-4 focus:ring-indigo-500/20" value={editExtData.recordDeadline || ''} onChange={e => setEditExtData({...editExtData, recordDeadline: e.target.value})} /></div>
+                                        <div className="space-y-1.5"><label className="text-sm font-medium text-slate-600 px-1">紀錄實際取號日</label><input type="date" disabled={caseData.status==='CLOSED'} className="w-full rounded-2xl px-4 py-3.5 focus:ring-4 focus:ring-indigo-500/20" value={editExtData.recordActualDate || ''} onChange={e => setEditExtData({...editExtData, recordActualDate: e.target.value})} /></div>
+                                        <div className="space-y-1.5"><label className="text-sm font-medium text-slate-600 px-1">會勘紀錄文號</label><input type="text" disabled={caseData.status==='CLOSED'} placeholder="輸入文號" className="w-full rounded-2xl px-4 py-3.5 focus:ring-4 focus:ring-indigo-500/20" value={editExtData.recordDocNo || ''} onChange={e => setEditExtData({...editExtData, recordDocNo: e.target.value})} /></div>
+                                        <div className="md:col-span-2 space-y-1.5"><label className="text-sm font-medium text-slate-600 px-1">會勘決議事項</label><textarea rows="2" disabled={caseData.status==='CLOSED'} placeholder="填寫決議內容..." className="w-full rounded-3xl px-4 py-4 leading-relaxed focus:ring-4 focus:ring-indigo-500/20" value={editExtData.surveyResolution || ''} onChange={e => setEditExtData({...editExtData, surveyResolution: e.target.value})}></textarea></div>
+                                        <div className="md:col-span-2 my-2 border-b border-slate-100"></div>
+                                        <div className="space-y-1.5"><label className="text-sm font-medium text-slate-600 px-1">結案期限</label><input type="date" disabled={caseData.status==='CLOSED'} className="w-full rounded-2xl px-4 py-3.5 text-orange-600 bg-orange-50/30 focus:ring-4 focus:ring-indigo-500/20" value={editExtData.completionDeadline || ''} onChange={e => setEditExtData({...editExtData, completionDeadline: e.target.value})} /></div>
+                                        <div className="flex items-center justify-start md:mt-6"><label className="flex items-center cursor-pointer group"><input type="checkbox" disabled={caseData.status==='CLOSED'} checked={editExtData.noDispatchRequired || false} onChange={e => setEditExtData({...editExtData, noDispatchRequired: e.target.checked})} className="w-5 h-5 text-primary border-slate-300 rounded focus:ring-primary transition-colors cursor-pointer" /><span className="ml-3 text-sm font-bold text-slate-600 group-hover:text-primary transition-colors">不需派工施作 (可直接結案)</span></label></div>
+                                        {!editExtData.noDispatchRequired && (
+                                            <>
+                                                <div className="space-y-1.5 animate-fade-in"><label className="text-sm font-medium text-slate-600 px-1">派工日期</label><input type="date" disabled={caseData.status==='CLOSED'} className="w-full rounded-2xl px-4 py-3.5 focus:ring-4 focus:ring-indigo-500/20" value={editExtData.dispatchDate || ''} onChange={e => setEditExtData({...editExtData, dispatchDate: e.target.value})} /></div>
+                                                <div className="space-y-1.5 animate-fade-in"><label className="text-sm font-medium text-slate-600 px-1">完工日期</label><input type="date" disabled={caseData.status==='CLOSED'} className="w-full rounded-2xl px-4 py-3.5 focus:ring-4 focus:ring-indigo-500/20" value={editExtData.completionDate || ''} onChange={e => setEditExtData({...editExtData, completionDate: e.target.value})} /></div>
+                                            </>
+                                        )}
+                                    </>
+                                )}
+                                <div className="md:col-span-2 space-y-1.5 border-t border-slate-100 pt-4 mt-2"><label className="text-sm font-medium text-amber-600 px-1">備註事項 (任何階段皆可修改)</label><textarea rows="2" placeholder="紀錄其他補充事項..." className={`w-full rounded-2xl px-4 py-3 leading-relaxed border-amber-200 bg-amber-50 focus:bg-white focus:ring-4 focus:ring-amber-500/20`} value={editExtData.note || ''} onChange={e => setEditExtData({...editExtData, note: e.target.value})}></textarea></div>
+                            </div>
+                            <div className="mt-8 flex gap-4">
+                                {caseData.status !== 'CLOSED' ? (
+                                    <>
+                                        <button disabled={isSubmitting} onClick={() => handleExtDataReply('PENDING')} className={`flex-1 py-4 ${isSpecialMode ? 'bg-red-50 text-red-600 hover:bg-red-100' : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100'} rounded-2xl font-bold text-base transition-all active:scale-[0.98]`}>{isSubmitting ? '儲存中...' : '僅儲存進度 / 備註'}</button>
+                                        <button disabled={isSubmitting} onClick={() => handleExtDataReply('CLOSED')} className={`flex-1 py-4 ${themeBtn} text-white rounded-2xl font-bold text-base shadow-float transition-all active:scale-[0.98] flex justify-center items-center gap-2`}><Icons.Check /> {isSubmitting ? '處理中...' : '儲存並結案'}</button>
+                                    </>
+                                ) : (
+                                    <div className="mt-8 flex gap-4 flex-col md:flex-row w-full"><button disabled={isSubmitting} onClick={() => handleExtDataReply('CLOSED')} className="flex-1 py-4 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 border border-emerald-200 rounded-2xl font-bold text-base transition-all active:scale-[0.98]">儲存備註變更</button><button disabled={isSubmitting} onClick={handleRevert} className="flex-1 py-4 bg-white border-2 border-slate-100 text-slate-600 hover:border-orange-200 hover:bg-orange-50 hover:text-orange-600 rounded-2xl font-bold text-base transition-all active:scale-[0.98] flex justify-center items-center gap-2"><Icons.Undo /> 恢復為「辦理中」狀態</button></div>
+                                )}
+                            </div>
+                        </div>
+                        <div className="bg-white p-8 rounded-3xl shadow-soft shrink-0">
+                            <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-6 px-1">系統歷程</h3>
+                            <div className="relative border-l-2 border-slate-100 ml-4 space-y-8">
+                                {caseData.history.map((item, idx) => (
+                                    <div key={idx} className="relative pl-8 group">
+                                        <div className="absolute -left-[9px] top-1 w-4 h-4 rounded-full bg-slate-200 border-4 border-white"></div>
+                                        <div className="flex flex-wrap items-baseline justify-between mb-1.5">
+                                            <div className="flex gap-x-3 items-baseline"><span className="font-bold text-slate-700">{item.author}</span><span className="text-xs font-medium text-slate-400">{item.date}</span></div>
+                                            {isSpecialMode && caseData.status !== 'CLOSED' && editingHistoryIdx !== idx && (<button onClick={() => { setEditingHistoryIdx(idx); setEditingHistoryContent(item.content); }} className="text-primary opacity-0 group-hover:opacity-100 transition-opacity text-xs flex items-center gap-1 hover:underline bg-indigo-50 px-2 py-1 rounded"><Icons.Edit /> 修改</button>)}
+                                        </div>
+                                        {editingHistoryIdx === idx ? (
+                                            <div className="bg-slate-50 p-4 rounded-2xl w-full border border-indigo-200 shadow-inner mt-2"><textarea className="w-full rounded-xl px-3 py-2 border border-slate-200 focus:ring-4 focus:ring-indigo-500/20 bg-white text-slate-700 leading-relaxed min-h-[80px] text-sm" value={editingHistoryContent} onChange={(e) => setEditingHistoryContent(e.target.value)} /><div className="flex gap-2 justify-end mt-3"><button onClick={() => setEditingHistoryIdx(null)} className="px-4 py-1.5 text-xs font-bold bg-slate-200 text-slate-600 rounded-lg hover:bg-slate-300 transition-colors">取消</button><button onClick={() => { onEditHistory(caseData.id, idx, editingHistoryContent); setEditingHistoryIdx(null); }} className="px-4 py-1.5 text-xs font-bold bg-primary text-white rounded-lg hover:bg-indigo-600 shadow-sm transition-colors">儲存修改</button></div></div>
+                                        ) : (
+                                            <div className="bg-slate-50 p-4 rounded-2xl text-sm text-slate-600 leading-relaxed inline-block min-w-[200px] w-full break-words whitespace-pre-wrap mt-2">{item.content}</div>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const CaseManagementSystem = () => {
+            const [view, setView] = useState('LIST'); 
+            const [cases, setCases] = useState([]);
+            const [selectedCase, setSelectedCase] = useState(null);
+            const [showNotifications, setShowNotifications] = useState(false);
+            const [showSettings, setShowSettings] = useState(false);
+            const [syncStatus, setSyncStatus] = useState('CONNECTING');
+
+            useEffect(() => {
+                let unsubscribe = null;
+                const initStandaloneFirebase = async () => {
+                    const { initializeApp, getFirestore, collection, onSnapshot, doc, setDoc, getDoc, getAuth, signInAnonymously } = window.FirebaseModules;
+                    const myFirebaseConfig = {
+                        apiKey: "AIzaSyDIF96erTBV_p_2AxPH1_szXQ-L57wyk3Y",
+                        authDomain: "case-data-b9894.firebaseapp.com",
+                        projectId: "case-data-b9894",
+                        storageBucket: "case-data-b9894.firebasestorage.app",
+                        messagingSenderId: "699196825308",
+                        appId: "1:699196825308:web:28efc588e5424a394c5e19"
+                    };
+                    try {
+                        if (!window.fbStandaloneApp) {
+                            window.fbStandaloneApp = initializeApp(myFirebaseConfig, "App" + Date.now());
+                            window.fbStandaloneDb = getFirestore(window.fbStandaloneApp);
+                            window.fbAuth = getAuth(window.fbStandaloneApp);
+                        }
+                        try { await signInAnonymously(window.fbAuth); } catch (e) {}
+                        const db = window.fbStandaloneDb;
+                        const casesRef = collection(db, 'my_cases');
+                        const metaRef = doc(db, 'my_meta', 'seed_status');
+                        try { const metaSnap = await getDoc(metaRef); if (!metaSnap.exists()) { await setDoc(metaRef, { seeded: true, timestamp: new Date().toISOString() }); } } catch (e) {}
+                        unsubscribe = onSnapshot(casesRef, (snapshot) => {
+                            const loadedCases = [];
+                            snapshot.forEach(d => loadedCases.push({ id: d.id, ...d.data() }));
+                            setCases(sortCases(loadedCases));
+                            setSyncStatus('SYNCED');
+                        }, (e) => {
+                            setSyncStatus('ERROR');
+                            const localData = localStorage.getItem('cases_backup');
+                            if (localData) setCases(sortCases(JSON.parse(localData)));
+                        });
+                    } catch(e) {
+                        setSyncStatus('ERROR');
+                        window.fbStandaloneDb = null;
+                        const localData = localStorage.getItem('cases_backup');
+                        if (localData) setCases(sortCases(JSON.parse(localData)));
+                    }
+                };
+                const checkFirebase = setInterval(() => { if (window.FirebaseModules) { clearInterval(checkFirebase); initStandaloneFirebase(); } }, 50);
+                return () => { clearInterval(checkFirebase); if (unsubscribe) unsubscribe(); };
+            }, []);
+
+            useEffect(() => { 
+                try {
+                    localStorage.setItem('cases_backup', JSON.stringify(cases)); 
+                } catch(e) {
+                    console.warn("本機暫存空間已滿，略過此次備份", e);
+                }
+            }, [cases]);
+
+            const config = useMemo(() => ({
+                tabs: [
+                    { id: 'PROCESSING', label: '辦理中', icon: Icons.List, filter: c => c.status !== 'CLOSED' },
+                    { id: 'CLOSED', label: '已結案', icon: Icons.Archive, filter: c => c.status === 'CLOSED' }
+                ]
+            }), []);
+
+            const [activeListTab, setActiveListTab] = useState(config.tabs[0].id);
+
+            const handleSelectCase = (c) => { setSelectedCase(c); setView('DETAIL'); };
+
+            const overdueCases = useMemo(() => {
+                const today = new Date(); today.setHours(0, 0, 0, 0);
+                return cases.filter(c => {
+                    if (c.status === 'CLOSED' || !c.extData?.recordDeadline || c.extData.recordActualDate) return false; 
+                    const deadline = new Date(c.extData.recordDeadline); deadline.setHours(0, 0, 0, 0); 
+                    return today >= deadline; 
+                }).map(c => {
+                    const deadline = new Date(c.extData.recordDeadline); deadline.setHours(0, 0, 0, 0);
+                    return { ...c, isToday: today.getTime() === deadline.getTime() };
+                });
+            }, [cases]);
+
+            const closingNotices = useMemo(() => {
+                const today = new Date(); today.setHours(0, 0, 0, 0);
+                return cases.filter(c => {
+                    if (c.status === 'CLOSED' || !c.extData?.completionDeadline) return false;
+                    const deadline = new Date(c.extData.completionDeadline); deadline.setHours(0, 0, 0, 0);
+                    const diffDays = Math.ceil((deadline.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+                    if (diffDays <= 14) { c.noticeType = '2_WEEKS'; c.daysLeft = diffDays; return true; }
+                    if (diffDays > 14 && diffDays <= 30) {
+                        if (c.extData.dismissedMonthNotice) return false; 
+                        c.noticeType = '1_MONTH'; c.daysLeft = diffDays; return true;
+                    }
+                    return false;
+                });
+            }, [cases]);
+
+            const dismissClosingNotice = async (e, id) => {
+                e.stopPropagation();
+                const caseToUpdate = cases.find(c => c.id === id);
+                if (!caseToUpdate) return;
+                const updatedCase = { ...caseToUpdate, extData: { ...caseToUpdate.extData, dismissedMonthNotice: true } };
+                const cleanCase = JSON.parse(JSON.stringify(updatedCase)); 
+                setCases(prev => prev.map(c => c.id === id ? cleanCase : c));
+                if (window.fbStandaloneDb) { try { const { setDoc, doc } = window.FirebaseModules; await setDoc(doc(window.fbStandaloneDb, 'my_cases', id), cleanCase); } catch (err) {} }
+            };
+
+            const handleCreateCase = async (newCase) => {
+                const caseId = "CASE" + Date.now().toString() + Math.random().toString(36).substring(2, 6);
+                const caseRecord = {
+                    id: caseId, caseNumber: newCase.caseNumber || caseId, category: newCase.category || 'OTHER', caseType: newCase.caseType || 'NORMAL',
+                    petitioner: { name: newCase.name || '' }, 
+                    location: { district: newCase.district || '', address: newCase.address || '' },
+                    content: newCase.content || '', status: 'PENDING', createdAt: getLocalISODate(),
+                    history: [{ date: getLocalISODate(), author: `系統`, content: '案件建立', type: 'USER' }],
+                    extData: newCase.extData || {}
+                };
+                const cleanRecord = JSON.parse(JSON.stringify(caseRecord)); 
+                setCases(prev => sortCases([cleanRecord, ...prev]));
+                setView(newCase.caseType === 'SPECIAL' ? 'SPECIAL_LIST' : 'LIST'); 
+                setActiveListTab('PROCESSING'); 
+                if (window.fbStandaloneDb) { try { const { setDoc, doc } = window.FirebaseModules; await setDoc(doc(window.fbStandaloneDb, 'my_cases', caseId), cleanRecord); } catch (err) { alert("同步失敗！請檢查權限。"); } }
+            };
+
+            const handleUpdateBasicInfo = async (id, updates) => {
+                const caseToUpdate = cases.find(c => c.id === id);
+                if (!caseToUpdate) return;
+                const updatedCase = { ...caseToUpdate, ...updates };
+                const cleanCase = JSON.parse(JSON.stringify(updatedCase)); 
+                setCases(prevCases => sortCases(prevCases.map(c => c.id === id ? cleanCase : c)));
+                setSelectedCase(cleanCase);
+                if (window.fbStandaloneDb) {
+                    try {
+                        const { setDoc, doc } = window.FirebaseModules;
+                        await setDoc(doc(window.fbStandaloneDb, 'my_cases', id), cleanCase);
+                    } catch (err) { 
+                        alert("⚠️ 雲端同步被拒絕！請前往 Firebase Console -> Firestore Database -> Rules 將規則改為 allow read, write: if true;");
+                    }
+                }
+            };
+
+            const handleUpdateStatus = async (id, newStatus, replyText, newExtData) => {
+                const caseToUpdate = cases.find(c => c.id === id);
+                if (!caseToUpdate) return;
+                let updatedHistory = caseToUpdate.history;
+                if (replyText) updatedHistory = [...caseToUpdate.history, { date: getLocalISODate(), author: '承辦人員', content: replyText, type: 'STAFF' }];
+                const updatedCase = { ...caseToUpdate, status: newStatus, history: updatedHistory, extData: newExtData ? { ...caseToUpdate.extData, ...newExtData } : caseToUpdate.extData };
+                const cleanCase = JSON.parse(JSON.stringify(updatedCase)); 
+                setCases(prevCases => sortCases(prevCases.map(c => c.id === id ? cleanCase : c)));
+                setSelectedCase(cleanCase);
+                if (window.fbStandaloneDb) { try { const { setDoc, doc } = window.FirebaseModules; await setDoc(doc(window.fbStandaloneDb, 'my_cases', id), cleanCase); } catch (err) { alert("同步被拒絕！"); } }
+            };
+
+            const handleEditHistory = async (id, historyIdx, newContent) => {
+                const caseToUpdate = cases.find(c => c.id === id);
+                if (!caseToUpdate) return;
+                let updatedHistory = [...caseToUpdate.history];
+                updatedHistory[historyIdx] = { ...updatedHistory[historyIdx], content: newContent };
+                const updatedCase = { ...caseToUpdate, history: updatedHistory };
+                const cleanCase = JSON.parse(JSON.stringify(updatedCase));
+                setCases(prevCases => sortCases(prevCases.map(c => c.id === id ? cleanCase : c)));
+                setSelectedCase(cleanCase);
+                if (window.fbStandaloneDb) { try { const { setDoc, doc } = window.FirebaseModules; await setDoc(doc(window.fbStandaloneDb, 'my_cases', id), cleanCase); } catch (err) { alert("同步被拒絕！"); } }
+            };
+
+            const handleDeleteCase = async (id) => {
+                const deletedCase = cases.find(c => c.id === id);
+                const returnView = deletedCase?.caseType === 'SPECIAL' ? 'SPECIAL_LIST' : 'LIST';
+                setCases(prevCases => prevCases.filter(c => c.id !== id));
+                setSelectedCase(null); 
+                setView(returnView);
+                if (window.fbStandaloneDb) { try { const { deleteDoc, doc } = window.FirebaseModules; await deleteDoc(doc(window.fbStandaloneDb, 'my_cases', id)); } catch (err) { alert("雲端刪除失敗！"); } }
+            };
+
+            // --- 匯出 Excel 功能 ---
+            const handleExportExcel = () => {
+                try {
+                    const normalCases = cases.filter(c => c.caseType !== 'SPECIAL');
+                    const specialCases = cases.filter(c => c.caseType === 'SPECIAL');
+
+                    const normalData = normalCases.map(c => ({
+                        '案件類別': c.category === 'SURVEY' ? '會勘' : c.category === 'REPLY' ? '回復' : c.category === 'A1' ? 'A1事故' : '其他',
+                        '案件狀態': c.status === 'CLOSED' ? '已結案' : '辦理中',
+                        '收件日期': c.extData?.receiveDate || '',
+                        '會勘/回復日': c.extData?.surveyDate || c.extData?.replyDate || '',
+                        '案件地點': c.location?.address || '',
+                        '負責承辦人': c.extData?.assignee || '',
+                        '陳情人': c.petitioner?.name || '',
+                        '陳情內容': c.content || '',
+                        '相關文號': c.extData?.surveyDocNo || c.extData?.replyDocNo || '',
+                        '預定結案期限': c.extData?.completionDeadline || '',
+                        '派工日期': c.extData?.dispatchDate || '',
+                        '實際完工日': c.extData?.completionDate || '',
+                        '備註事項': c.extData?.note || '',
+                        '系統編號': c.id || ''
+                    }));
+
+                    const specialData = specialCases.map(c => ({
+                        '案件類別': c.category === 'DIRECTOR' ? '局長案' : c.category === 'TEMP' ? '臨時交辦' : '其他',
+                        '案件狀態': c.status === 'CLOSED' ? '已結案' : '辦理中',
+                        '收件日期': c.extData?.receiveDate || '',
+                        '交辦時間': c.extData?.assignDate || '',
+                        '負責承辦人': c.extData?.assignee || '',
+                        '交辦內容': c.content || '',
+                        '預定結案期限': c.extData?.completionDeadline || '',
+                        '實際結案時間': c.extData?.completionDate || '',
+                        '備註事項': c.extData?.note || '',
+                        '系統編號': c.id || ''
+                    }));
+
+                    const wsNormal = XLSX.utils.json_to_sheet(normalData);
+                    const wsSpecial = XLSX.utils.json_to_sheet(specialData);
+
+                    wsNormal['!cols'] = [
+                        { wch: 12 }, { wch: 12 }, { wch: 15 }, { wch: 15 }, 
+                        { wch: 40 }, { wch: 15 }, { wch: 15 }, { wch: 60 }, 
+                        { wch: 25 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, 
+                        { wch: 40 }, { wch: 20 }
+                    ];
+
+                    wsSpecial['!cols'] = [
+                        { wch: 12 }, { wch: 12 }, { wch: 15 }, { wch: 15 }, 
+                        { wch: 15 }, { wch: 60 }, { wch: 15 }, { wch: 15 }, 
+                        { wch: 40 }, { wch: 20 }
+                    ];
+
+                    const wb = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(wb, wsNormal, "一般案件");
+                    if (specialCases.length > 0) {
+                        XLSX.utils.book_append_sheet(wb, wsSpecial, "特殊交辦案件");
+                    }
+
+                    XLSX.writeFile(wb, `列管案件清單_${getLocalISODate()}.xlsx`);
+                    setShowSettings(false);
+                } catch (error) {
+                    console.error(error);
+                    alert("匯出 Excel 失敗，請確認已載入相關模組。");
+                }
+            };
+
+            const handleExportBackup = () => {
+                const dataStr = JSON.stringify(cases, null, 2);
+                const blob = new Blob([dataStr], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = `案件備份檔_${getLocalISODate()}.json`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                setShowSettings(false);
+            };
+
+            const handleImportBackup = async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                const reader = new FileReader();
+                reader.onload = async (event) => {
+                    try {
+                        const importedCases = JSON.parse(event.target.result);
+                        if (!Array.isArray(importedCases)) throw new Error("檔案格式不正確，必須是有效的備份檔。");
+
+                        if (!window.confirm(`確定要匯入 ${importedCases.length} 筆案件嗎？\n這將會覆寫雲端上同編號的現有資料！`)) return;
+
+                        if (window.fbStandaloneDb) {
+                            const { setDoc, doc } = window.FirebaseModules;
+                            let successCount = 0;
+                            for (const c of importedCases) {
+                                if (c.id) {
+                                    await setDoc(doc(window.fbStandaloneDb, 'my_cases', c.id), c);
+                                    successCount++;
+                                }
+                            }
+                            alert(`✅ 成功匯入並同步 ${successCount} 筆案件資料！\n(系統將自動刷新列表)`);
+                        } else {
+                            alert("⚠️ 尚未連線至雲端，目前僅匯入至本機暫存！");
+                            const newCasesMap = new Map(cases.map(c => [c.id, c]));
+                            importedCases.forEach(c => {
+                                if (c.id) newCasesMap.set(c.id, c);
+                            });
+                            setCases(sortCases(Array.from(newCasesMap.values())));
+                        }
+                    } catch (err) {
+                        alert("❌ 匯入失敗：\n" + err.message);
+                    }
+                };
+                reader.readAsText(file);
+                e.target.value = ''; 
+                setShowSettings(false);
+            };
+
+            const totalNotices = overdueCases.length + closingNotices.length;
+
+            return (
+                <div className="h-[100dvh] w-screen overflow-hidden flex flex-col md:flex-row bg-surface">
+                    <aside className="hidden md:flex w-72 bg-white border-r border-slate-100 flex-col shrink-0 z-20">
+                        <div className="p-8 pb-4">
+                            <div className="w-12 h-12 bg-primary text-white rounded-2xl flex items-center justify-center mb-6 shadow-float"><Icons.Folder /></div>
+                            <h1 className="text-2xl font-black tracking-tight text-slate-800">列管案件管理</h1>
+                            <div className="text-xs mt-2 text-slate-400 font-bold uppercase tracking-widest">交管系統</div>
+                        </div>
+                        <nav className="flex-1 p-5 space-y-3 mt-2">
+                            <button onClick={() => setView('LIST')} className={`w-full flex items-center gap-3 px-5 py-4 rounded-2xl transition-all font-bold text-sm ${view === 'LIST' ? 'bg-indigo-50 text-primary shadow-sm' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}><Icons.List /> 案件清單</button>
+                            <button onClick={() => setView('SPECIAL_LIST')} className={`w-full flex items-center gap-3 px-5 py-4 rounded-2xl transition-all font-bold text-sm ${view === 'SPECIAL_LIST' ? 'bg-red-500 text-white shadow-md' : 'bg-red-50 text-red-600 hover:bg-red-100'}`}><Icons.Alert /> 特殊交辦案件</button>
+                        </nav>
+                        <div className="p-6 pb-8 space-y-3">
+                             <button onClick={() => setView('CREATE')} className="w-full flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-900 text-white py-4 rounded-2xl font-bold shadow-float transition-transform active:scale-95"><Icons.Plus /> 新增一般案件</button>
+                            <button onClick={() => setView('CREATE_SPECIAL')} className="w-full flex items-center justify-center gap-2 bg-red-600 hover:bg-red-700 text-white py-4 rounded-2xl font-bold shadow-float transition-transform active:scale-95"><Icons.Star /> 新增特殊交辦</button>
+                        </div>
+                    </aside>
+                    <div className="md:hidden fixed bottom-0 left-0 right-0 bg-white/80 backdrop-blur-lg border-t border-slate-100 flex justify-around items-center px-4 py-2 z-bottom-nav pb-safe shadow-[0_-10px_40px_rgba(0,0,0,0.05)]">
+                        <button onClick={() => setView('LIST')} className={`flex flex-col items-center p-3 rounded-2xl transition-colors ${view === 'LIST' ? 'text-primary bg-indigo-50' : 'text-slate-400'}`}><Icons.List /></button>
+                        <button onClick={() => setView('SPECIAL_LIST')} className={`flex flex-col items-center p-3 rounded-2xl transition-colors ${view === 'SPECIAL_LIST' ? 'text-red-600 bg-red-50' : 'text-red-400'}`}><Icons.Alert /></button>
+                        <button onClick={() => setView(view === 'SPECIAL_LIST' ? 'CREATE_SPECIAL' : 'CREATE')} className={`flex flex-col items-center p-4 -mt-10 rounded-full text-white shadow-float active:scale-95 transition-transform border-4 border-surface ${view === 'SPECIAL_LIST' ? 'bg-red-600' : 'bg-slate-800'}`}><Icons.Plus /></button>
+                    </div>
+                    <main className="flex-1 flex flex-col min-w-0 mb-16 md:mb-0 h-full overflow-hidden relative">
+                        <header className="bg-transparent px-6 md:px-10 py-6 flex justify-between items-center z-[60] shrink-0">
+                            <h2 className="text-2xl font-black text-slate-800 tracking-tight">{view === 'LIST' && '案件清單總覽'}{view === 'SPECIAL_LIST' && '特殊交辦清單'}{view === 'CREATE' && '建立一般案件'}{view === 'CREATE_SPECIAL' && '建立特殊交辦'}{view === 'DETAIL' && (selectedCase?.caseType === 'SPECIAL' ? '特殊交辦處理進度' : '案件處理進度')}</h2>
+                            <div className="flex items-center gap-3">
+                                <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-full bg-white shadow-soft text-xs font-bold border border-slate-100">{syncStatus === 'CONNECTING' && <><span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span><span className="text-slate-500">連線中...</span></>}{syncStatus === 'SYNCED' && <><span className="w-2 h-2 rounded-full bg-emerald-500"></span><span className="text-emerald-700">雲端已同步</span></>}{syncStatus === 'ERROR' && <><span className="w-2 h-2 rounded-full bg-red-500"></span><span className="text-red-600">本機暫存 (被阻擋)</span></>}</div>
+                                
+                                {/* Notifications Bell */}
+                                <div className="relative">
+                                    <button onClick={() => { setShowNotifications(!showNotifications); setShowSettings(false); }} className={`relative p-3 rounded-2xl transition-all ${showNotifications ? 'bg-indigo-100 text-primary shadow-inner' : 'bg-white text-slate-400 shadow-soft hover:text-primary hover:bg-indigo-50'}`}><Icons.Bell />{totalNotices > 0 && (<span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 text-white text-[10px] font-black rounded-full flex items-center justify-center border-2 border-white shadow-sm">{totalNotices}</span>)}</button>
+                                    {showNotifications && (
+                                        <>
+                                            <div className="fixed inset-0 z-40" onClick={() => setShowNotifications(false)}></div>
+                                            <div className="absolute right-0 mt-3 w-[calc(100vw-3rem)] md:w-96 bg-white rounded-3xl shadow-float border border-slate-100 overflow-hidden z-50 animate-fade-in origin-top-right flex flex-col max-h-[80vh]">
+                                                {overdueCases.length > 0 && (
+                                                    <div className="flex-shrink-0">
+                                                        <div className="bg-rose-50/50 px-5 py-4 border-b border-rose-100"><h3 className="font-black text-rose-700 text-sm flex items-center gap-2"><Icons.Alert /> 取號逾期 / 今日到期 ({overdueCases.length})</h3></div>
+                                                        <div className="max-h-[600px] overflow-y-auto divide-y divide-slate-50 bg-white">
+                                                            {overdueCases.map(c => (
+                                                                <div key={c.id} onClick={() => { handleSelectCase(c); setShowNotifications(false); }} className="p-5 hover:bg-rose-50/30 cursor-pointer transition-colors group"><div className="font-bold text-slate-800 text-sm group-hover:text-rose-600 transition-colors mb-2 leading-snug">{c.location?.district} - {c.location?.address}</div><div className="text-xs flex justify-between items-center"><span className="bg-slate-100 text-slate-500 px-2 py-1 rounded-md font-medium">期限: {c.extData.recordDeadline}</span><span className={`${c.isToday ? 'text-amber-500' : 'text-rose-500'} font-bold flex items-center gap-1`}>{c.isToday ? '今日到期' : '已逾期'}</span></div></div>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                                {closingNotices.length > 0 && (
+                                                    <div className="flex-shrink-0 border-t border-slate-100">
+                                                        <div className="bg-amber-50/50 px-5 py-4 border-b border-amber-100"><h3 className="font-black text-amber-700 text-sm flex items-center gap-2"><Icons.Clock /> 結案即將到期 ({closingNotices.length})</h3></div>
+                                                        <div className="max-h-[600px] overflow-y-auto divide-y divide-slate-50 bg-white">
+                                                            {closingNotices.map(c => (
+                                                                <div key={c.id} onClick={() => { handleSelectCase(c); setShowNotifications(false); }} className="p-5 hover:bg-amber-50/30 cursor-pointer transition-colors group relative">{c.noticeType === '1_MONTH' && (<button onClick={(e) => dismissClosingNotice(e, c.id)} className="absolute top-4 right-4 text-slate-300 hover:text-slate-600 hover:bg-slate-100 rounded-full w-7 h-7 flex items-center justify-center font-bold transition-colors z-10">✕</button>)}<div className="font-bold text-slate-800 text-sm group-hover:text-amber-600 transition-colors pr-8 mb-2 leading-snug">{c.location?.district} - {c.location?.address}</div><div className="text-xs flex justify-between items-center"><span className="bg-slate-100 text-slate-500 px-2 py-1 rounded-md font-medium">期限: {c.extData.completionDeadline}</span><span className={`${c.noticeType === '2_WEEKS' ? 'text-rose-500' : 'text-amber-500'} font-bold flex items-center gap-1`}>{c.daysLeft < 0 ? '已逾期' : `剩餘 ${c.daysLeft} 天`}</span></div></div>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                                {totalNotices === 0 && (<div className="p-10 text-center flex flex-col items-center gap-3"><div className="w-12 h-12 bg-emerald-50 text-emerald-500 rounded-full flex items-center justify-center"><Icons.Check /></div><span className="text-sm text-slate-400 font-bold">目前無任何待辦通知 🎉</span></div>)}
+                                            </div>
+                                        </>
+                                    )}
+                                </div>
+
+                                {/* Settings Menu */}
+                                <div className="relative">
+                                    <button onClick={() => { setShowSettings(!showSettings); setShowNotifications(false); }} className={`relative p-3 rounded-2xl transition-all ${showSettings ? 'bg-indigo-100 text-primary shadow-inner' : 'bg-white text-slate-400 shadow-soft hover:text-primary hover:bg-indigo-50'}`}><Icons.Settings /></button>
+                                    {showSettings && (
+                                        <>
+                                            <div className="fixed inset-0 z-40" onClick={() => setShowSettings(false)}></div>
+                                            <div className="absolute right-0 mt-3 w-64 bg-white rounded-3xl shadow-float border border-slate-100 overflow-hidden z-50 animate-fade-in origin-top-right flex flex-col">
+                                                <div className="bg-slate-50/50 px-5 py-4 border-b border-slate-100">
+                                                    <h3 className="font-black text-slate-700 text-sm flex items-center gap-2">資料管理與設定</h3>
+                                                </div>
+                                                <div className="p-2 flex flex-col gap-1">
+                                                    <button onClick={handleExportExcel} className="flex items-center gap-3 px-4 py-3 text-sm font-bold text-emerald-600 hover:bg-emerald-50 rounded-xl transition-colors">
+                                                        <Icons.FileExcel /> 匯出 Excel 報表
+                                                    </button>
+                                                    <div className="h-px bg-slate-100 my-1 mx-2"></div>
+                                                    <button onClick={handleExportBackup} className="flex items-center gap-3 px-4 py-3 text-sm font-bold text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors">
+                                                        <Icons.Download /> 下載備份檔 (.json)
+                                                    </button>
+                                                    <label className="flex items-center gap-3 px-4 py-3 text-sm font-bold text-amber-600 hover:bg-amber-50 rounded-xl transition-colors cursor-pointer">
+                                                        <Icons.Upload /> 匯入備份檔 (.json)
+                                                        <input type="file" accept=".json" className="hidden" onChange={handleImportBackup} />
+                                                    </label>
+                                                </div>
+                                            </div>
+                                        </>
+                                    )}
+                                </div>
+                            </div>
+                        </header>
+                        <div className="flex-1 px-4 md:px-10 pb-4 md:pb-10 overflow-hidden flex flex-col">
+                            {view === 'LIST' && <CaseList cases={cases} onSelectCase={handleSelectCase} activeTab={activeListTab} onTabChange={setActiveListTab} config={config} isSpecialMode={false} />}
+                            {view === 'SPECIAL_LIST' && <CaseList cases={cases} onSelectCase={handleSelectCase} activeTab={activeListTab} onTabChange={setActiveListTab} config={config} isSpecialMode={true} />}
+                            {view === 'CREATE' && <CaseForm onSubmit={handleCreateCase} onCancel={() => setView('LIST')} isSpecialMode={false} />}
+                            {view === 'CREATE_SPECIAL' && <CaseForm onSubmit={handleCreateCase} onCancel={() => setView('SPECIAL_LIST')} isSpecialMode={true} />}
+                            {view === 'DETAIL' && selectedCase && <CaseDetail caseData={selectedCase} onBack={() => setView(selectedCase.caseType === 'SPECIAL' ? 'SPECIAL_LIST' : 'LIST')} onUpdateStatus={handleUpdateStatus} onDelete={handleDeleteCase} onEditHistory={handleEditHistory} onUpdateBasicInfo={handleUpdateBasicInfo} />}
+                        </div>
+                    </main>
+                </div>
+            );
+        };
+
+        const App = () => { return <CaseManagementSystem />; };
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
